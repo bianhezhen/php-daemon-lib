@@ -1,14 +1,6 @@
 <?php
 
 /**
- * 
- * TODO:
- * - complete signal procesing,
- * - logging,
- * - lock pid file?
- */
-
-/**
  * Base class for daemons creation.
  * 
  * 
@@ -24,6 +16,8 @@
  * daemon      bool      daemonize process or not,
  * delay       int       pause between doWork method calls (in seconds),  
  * root_dir    string    path to daemon root dir,
+ * log_file    string    log file name, 'daemon.log' by default,
+ * log_level   int       logging level, Daemon::LOG_INFO by default,
  * uid         int       system uid,
  * gid         int       system gid,
  * euid        int       system effective uid,
@@ -35,11 +29,70 @@
 abstract class Daemon
 {
   /**
+   * Debug messages.
+   * @var int
+   */
+  const LOG_DEBUG   = 1;
+
+  /**
+   * Info messages , level by default.
+   * @var int
+   */  
+  const LOG_INFO    = 2;
+  
+  /**
+   * Warning messages.
+   * @var int
+   */
+  const LOG_WARNING = 3;
+  
+  /**
+   * Error messages.
+   * @var int
+   */
+  const LOG_ERROR   = 4;
+  
+  /**
+   * Critical messages.
+   * @var int
+   */
+  const LOG_CRIT    = 5;
+  
+  /**
+   * Logging level names.
+   * @var array
+   */
+  protected $logLevels = array(
+      self::LOG_DEBUG   => 'debug',
+  
+      self::LOG_INFO    => 'info',
+  
+      self::LOG_WARNING => 'warning',
+  
+      self::LOG_ERROR   => 'error',
+  
+      self::LOG_CRIT    => 'crit'
+    );
+    
+  
+  /**
    * 
    * Daemon options.
    * @var array
    */
   protected $options = array();
+
+  /**
+   * Pid file resource.
+   * @var resource
+   */
+  protected $pidFp   = null;
+
+  /**
+   * Log file resource.
+   * @var resource
+   */  
+  protected $logFp   = null;
   
   /**
    * 
@@ -55,6 +108,7 @@ abstract class Daemon
   public function configure(array $options)
   {
     $this->options = $options;
+    
     return $this;
   }
   
@@ -75,18 +129,27 @@ abstract class Daemon
     
     if ($this->getPid() !== 0)
     {
-      echo 'Script already running.';
+      $this->log('Script already running.', self::LOG_CRIT);
       exit(-1);      
     }
     
     if ($this->getOption('daemon', true))
     {
       $this->daemonize();
+      $this->log('Daemonize.', self::LOG_DEBUG);
     }
     
     $this->setSignalHandlers();
+    $this->log('Signals.', self::LOG_DEBUG);
     
-    $this->loop();
+    try
+    {
+      $this->loop();
+    }
+    catch(Exception $e)
+    {
+      $this->log('Crit error, native message: '.$e->getMessage(), self::LOG_CRIT);
+    }
   }
   
   /**
@@ -244,6 +307,44 @@ abstract class Daemon
     $this->unsetPid();
     exit(0);
   }
+
+  /**
+   * @param string message for logging
+   * @param int    logging level
+   * 
+   * @return bool 
+   */
+  public function log($message, $level)
+  {
+    $currentLevel = $this->getOption('log_level', self::LOG_INFO);
+    
+    if ($level > $currentLevel)
+    {
+      return false;
+    }
+    
+    if (!is_resource($this->logFp))
+    {
+      $logFile = $this->getOption('log_file', 'daemon.log');
+      
+      $this->logFp = fopen($logFile, 'w');
+      
+      flock($this->logFp, LOCK_EX);
+    }
+    
+    $line = sprintf("[%s]\t[%s]\t%s", date('Y-m-d H:i:s'), $this->logLevels[$level], $message);
+    
+    return (bool) fwrite($this->logFp, $line);
+  }
+  
+  public function closeLog()
+  {
+    if (is_resource($this->logFp))
+    {
+      flock($this->logFp, LOCK_UN);
+      fclose($this->logFp);
+    }  
+  }
   
   /**
    * 
@@ -256,7 +357,16 @@ abstract class Daemon
   protected function setPid($pid)
   {
     $pidFile = $this->getOption('pid_file', 'daemon.pid');
-    return (file_put_contents($pidFile, $pid) > 0);
+    
+    if (!is_resource($this->pidFp))
+    {
+      $this->pidFp = fopen($pidFile, 'w');
+    }
+    
+    flock($this->pidFp, LOCK_EX);
+    $result = fwrite($this->pidFp, $pid);
+    
+    return (bool) $result;
   }
   
   /**
@@ -283,17 +393,18 @@ abstract class Daemon
    */
   protected function unsetPid()
   {
+    if (is_resource($this->pidFp))
+    {
+      flock($this->pidFp, LOCK_UN);
+    }
+    
     $pidFile = $this->getOption('pid_file', 'daemon.pid');
+     
     if (file_exists($pidFile))
     {
       return unlink($pidFile);
     }
     
     return false;
-  }
-  
-  protected function log($message, $level)
-  {
-    
   }
 }
